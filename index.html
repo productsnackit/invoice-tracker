@@ -63,7 +63,7 @@ function fmtMoney(n) {
 function findKey(row, candidates) {
   const keys = Object.keys(row);
   for (const c of candidates) {
-    const hit = keys.find((k) => k.toLowerCase().trim() === c);
+    const hit = keys.find((k) => k.toLowerCase().trim().replace(/[\s_]+/g, "") === c.replace(/[\s_]+/g, ""));
     if (hit) return hit;
   }
   for (const c of candidates) {
@@ -71,6 +71,20 @@ function findKey(row, candidates) {
     if (hit) return hit;
   }
   return null;
+}
+
+// Classifies a row's real-world state.
+// Trusts an explicit "overdue" status from the source system, but also
+// catches invoices left as sent/approved/unpaid whose due date has passed
+// in case the export's status field is stale.
+function classifyRow(statusRaw, dueDate, today) {
+  const s = String(statusRaw || "").trim().toLowerCase();
+  if (s === "paid" || s.includes("receiv")) return "paid";
+  if (s === "void" || s === "cancelled" || s === "canceled") return "void";
+  if (s === "draft") return "draft";
+  if (s === "overdue") return "overdue";
+  if (dueDate && dueDate < today) return "overdue";
+  return "upcoming";
 }
 
 function InvoiceOverdueTracker() {
@@ -94,36 +108,35 @@ function InvoiceOverdueTracker() {
           return;
         }
         const sample = json[0];
-        const dateKey = findKey(sample, ["date"]);
-        const invKey = findKey(sample, ["invoice number", "invoice no", "invoice"]);
-        const nameKey = findKey(sample, ["name", "company"]);
-        const amountKey = findKey(sample, ["amount"]);
-        const dueDayKey = findKey(sample, ["due day", "due days"]);
-        const statusKey = findKey(sample, ["payment staus", "payment status", "status"]);
-        const paidDateKey = findKey(sample, ["payment received date", "received date"]);
+        const dateKey = findKey(sample, ["date", "invoice date"]);
+        const dueDateKey = findKey(sample, ["due_date", "due date"]);
+        const invKey = findKey(sample, ["invoice_number", "invoice number", "invoice no", "invoice"]);
+        const nameKey = findKey(sample, ["customer_name", "customer name", "name", "company"]);
+        const amountKey = findKey(sample, ["bcy_total", "total", "amount"]);
+        const statusKey = findKey(sample, ["status", "payment status", "payment staus"]);
 
-        if (!dateKey || !invKey || !nameKey || !amountKey || !dueDayKey || !statusKey) {
-          setError("Couldn't find the expected columns. Make sure the sheet has Date, Invoice Number, Name, Amount, Due day and Payment status.");
+        if (!dateKey || !dueDateKey || !invKey || !nameKey || !amountKey || !statusKey) {
+          setError("Couldn't find the expected columns. Make sure the sheet has status, date, due_date, invoice_number, customer_name and bcy_total.");
           return;
         }
 
+        const todayRef = new Date();
         const parsed = json
           .map((r, i) => {
             const invoiceDate = parseDate(r[dateKey]);
-            const dueDays = Number(r[dueDayKey]) || 0;
-            const dueDate = invoiceDate ? addDays(invoiceDate, dueDays) : null;
+            const dueDate = parseDate(r[dueDateKey]);
             const amount = Number(r[amountKey]) || 0;
-            const statusRaw = String(r[statusKey] || "").trim().toLowerCase();
-            const isPaid = statusRaw.includes("receiv");
-            const paidDate = paidDateKey ? parseDate(r[paidDateKey]) : null;
-            const daysOverdue = dueDate ? daysBetween(new Date(), new Date(dueDate)) : null;
-            const isOverdue = !isPaid && dueDate && daysOverdue > 0;
+            const statusRaw = String(r[statusKey] || "").trim();
+            const category = classifyRow(statusRaw, dueDate, new Date(todayRef));
+            const isPaid = category === "paid";
+            const isOverdue = category === "overdue";
+            const daysOverdue = dueDate ? Math.max(0, daysBetween(new Date(), new Date(dueDate))) : 0;
             return {
               id: i,
               invoiceNumber: r[invKey],
               company: String(r[nameKey] || "Unspecified").trim(),
-              invoiceDate, dueDate, dueDays, amount, isPaid, paidDate, isOverdue,
-              daysOverdue: daysOverdue || 0,
+              invoiceDate, dueDate, amount, statusRaw, category, isPaid, isOverdue,
+              daysOverdue: isOverdue ? daysOverdue : 0,
             };
           })
           .filter((r) => r.company);
@@ -254,7 +267,7 @@ function InvoiceOverdueTracker() {
         )}
 
         <div style={{ marginTop: 28, fontFamily: "Arial, sans-serif", fontSize: 11.5, color: "#9A9D93", textAlign: "center", maxWidth: 400 }}>
-          Expected columns: Date, Invoice Number, Name, Amount, Due day, Payment status, Payment received date.
+          Expected columns: status, date, due_date, invoice_number, customer_name, bcy_total.
         </div>
       </div>
     );
