@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Overdue invoice tracker</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  body { margin: 0; background: #F4F5F2; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo, useCallback } = React;
+
+function excelSerialToDate(serial) {
+  const utcDays = Math.floor(serial - 25569);
+  return new Date(utcDays * 86400 * 1000);
+}
+
+function parseDate(val) {
+  if (val == null || val === "") return null;
+  if (val instanceof Date && !isNaN(val)) return val;
+  if (typeof val === "number") return excelSerialToDate(val);
+  if (typeof val === "string") {
+    const s = val.trim();
+    let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
+    m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+    const d = new Date(s);
+    if (!isNaN(d)) return d;
+  }
+  return null;
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + Number(days || 0));
+  return d;
+}
+
+function daysBetween(a, b) {
+  const MS = 86400000;
+  return Math.floor((a.setHours(0, 0, 0, 0) - b.setHours(0, 0, 0, 0)) / MS);
+}
+
+function fmtDate(d) {
+  if (!d) return "-";
+  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function fmtMoney(n) {
+  return n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+}
+
+function findKey(row, candidates) {
+  const keys = Object.keys(row);
+  for (const c of candidates) {
+    const hit = keys.find((k) => k.toLowerCase().trim() === c);
+    if (hit) return hit;
+  }
+  for (const c of candidates) {
+    const hit = keys.find((k) => k.toLowerCase().trim().includes(c));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function InvoiceOverdueTracker() {
+  const [rows, setRows] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const [error, setError] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const [expanded, setExpanded] = useState(null);
+  const [sortBy, setSortBy] = useState("overdueAmount");
+
+  const processFile = useCallback((file) => {
+    setError("");
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: "array", cellDates: true });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+        if (!json.length) {
+          setError("This sheet doesn't have any rows in it.");
+          return;
+        }
+        const sample = json[0];
+        const dateKey = findKey(sample, ["date"]);
+        const invKey = findKey(sample, ["invoice number", "invoice no", "invoice"]);
+        const nameKey = findKey(sample, ["name", "company"]);
+        const amountKey = findKey(sample, ["amount"]);
+        const dueDayKey = findKey(sample, ["due day", "due days"]);
+        const statusKey = findKey(sample, ["payment staus", "payment status", "status"]);
+        const paidDateKey = findKey(sample, ["payment received date", "received date"]);
+
+        if (!dateKey || !invKey || !nameKey || !amountKey || !dueDayKey || !statusKey) {
+          setError("Couldn't find the expected columns. Make sure the sheet has Date, Invoice Number, Name, Amount, Due day and Payment status.");
+          return;
+        }
+
+        const parsed = json
+          .map((r, i) => {
+            const invoiceDate = parseDate(r[dateKey]);
+            const dueDays = Number(r[dueDayKey]) || 0;
+            const dueDate = invoiceDate ? addDays(invoiceDate, dueDays) : null;
+            const amount = Number(r[amountKey]) || 0;
+            const statusRaw = String(r[statusKey] || "").trim().toLowerCase();
+            const isPaid = statusRaw.includes("receiv");
+            const paidDate = paidDateKey ? parseDate(r[paidDateKey]) : null;
+            const daysOverdue = dueDate ? daysBetween(new Date(), new Date(dueDate)) : null;
+            const isOverdue = !isPaid && dueDate && daysOverdue > 0;
+            return {
+              id: i,
+              invoiceNumber: r[invKey],
+              company: String(r[nameKey] || "Unspecified").trim(),
+              invoiceDate, dueDate, dueDays, amount, isPaid, paidDate, isOverdue,
+              daysOverdue: daysOverdue || 0,
+            };
+          })
+          .filter((r) => r.company);
+
+        setRows(parsed);
+        setFileName(file.name);
+      } catch (err) {
+        setError("Couldn't read that file. Double check it's a valid .xlsx or .csv export.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }, []);
+
+  const onInputChange = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) processFile(file);
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) processFile(file);
+  };
+
+  const companies = useMemo(() => {
+    if (!rows) return [];
+    const map = new Map();
+    for (const r of rows) {
+      if (!map.has(r.company)) {
+        map.set(r.company, { name: r.company, total: 0, totalAmount: 0, paid: 0, overdueCount: 0, overdueAmount: 0, maxDaysOverdue: 0, invoices: [] });
+      }
+      const c = map.get(r.company);
+      c.total += 1;
+      c.totalAmount += r.amount;
+      c.invoices.push(r);
+      if (r.isPaid) c.paid += 1;
+      if (r.isOverdue) {
+        c.overdueCount += 1;
+        c.overdueAmount += r.amount;
+        c.maxDaysOverdue = Math.max(c.maxDaysOverdue, r.daysOverdue);
+      }
+    }
+    const list = Array.from(map.values());
+    list.sort((a, b) => {
+      if (sortBy === "overdueAmount") return b.overdueAmount - a.overdueAmount;
+      if (sortBy === "overdueCount") return b.overdueCount - a.overdueCount;
+      if (sortBy === "name") return a.name.localeCompare(b.name);
+      return 0;
+    });
+    return list;
+  }, [rows, sortBy]);
+
+  const totals = useMemo(() => {
+    if (!rows) return null;
+    return {
+      invoices: rows.length,
+      companies: new Set(rows.map((r) => r.company)).size,
+      overdueCount: rows.filter((r) => r.isOverdue).length,
+      overdueAmount: rows.filter((r) => r.isOverdue).reduce((s, r) => s + r.amount, 0),
+      paidCount: rows.filter((r) => r.isPaid).length,
+    };
+  }, [rows]);
+
+  const downloadOverdueReport = () => {
+    const overdue = rows.filter((r) => r.isOverdue);
+    const data = overdue.slice().sort((a, b) => b.daysOverdue - a.daysOverdue).map((r) => ({
+      Company: r.company,
+      "Invoice Number": r.invoiceNumber,
+      "Invoice Date": fmtDate(r.invoiceDate),
+      "Due Date": fmtDate(r.dueDate),
+      Amount: r.amount,
+      "Days Overdue": r.daysOverdue,
+    }));
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws["!cols"] = [{ wch: 26 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 13 }];
+    XLSX.utils.book_append_sheet(wb, ws, "Overdue Invoices");
+
+    const summaryData = companies.filter((c) => c.overdueCount > 0).map((c) => ({
+      Company: c.name,
+      "Overdue Invoices": c.overdueCount,
+      "Overdue Amount": c.overdueAmount,
+      "Oldest Overdue (days)": c.maxDaysOverdue,
+      "Total Invoices": c.total,
+    }));
+    const ws2 = XLSX.utils.json_to_sheet(summaryData);
+    ws2["!cols"] = [{ wch: 26 }, { wch: 16 }, { wch: 15 }, { wch: 18 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, ws2, "By Company");
+
+    XLSX.writeFile(wb, "overdue-report-" + new Date().toISOString().slice(0, 10) + ".xlsx");
+  };
+
+  const reset = () => {
+    setRows(null);
+    setFileName("");
+    setError("");
+    setExpanded(null);
+  };
+
+  const ink = "#1B2A44", paper = "#F4F5F2", line = "#D8D9D2", rust = "#B14C2E", gold = "#9C7A2E", forest = "#3E6B4F";
+
+  if (!rows) {
+    return (
+      <div style={{ fontFamily: "Georgia, 'Times New Roman', serif", background: paper, minHeight: "100vh", padding: "48px 32px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontSize: 13, letterSpacing: 1, color: gold, fontFamily: "Arial, sans-serif", marginBottom: 8 }}>Accounts receivable</div>
+          <h1 style={{ fontSize: 30, color: ink, margin: 0, fontWeight: 400 }}>Overdue invoice tracker</h1>
+          <p style={{ color: "#6B6F66", fontFamily: "Arial, sans-serif", fontSize: 14, marginTop: 10, maxWidth: 420 }}>
+            Upload your invoice ledger and see which companies owe overdue payments, at a glance.
+          </p>
+        </div>
+
+        <label
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={onDrop}
+          style={{ width: 420, maxWidth: "90vw", border: "1.5px dashed " + (dragOver ? ink : line), borderRadius: 4, background: dragOver ? "#ECEEE7" : "#FFFFFF", padding: "40px 24px", display: "flex", flexDirection: "column", alignItems: "center", cursor: "pointer" }}
+        >
+          <div style={{ fontFamily: "Arial, sans-serif", fontSize: 14, color: ink, fontWeight: 600 }}>Drop your invoice file here</div>
+          <div style={{ fontFamily: "Arial, sans-serif", fontSize: 12.5, color: "#8B8E85", marginTop: 4 }}>or click to browse — .xlsx, .xls or .csv</div>
+          <input type="file" accept=".xlsx,.xls,.csv" onChange={onInputChange} style={{ display: "none" }} />
+        </label>
+
+        {error && (
+          <div style={{ marginTop: 18, fontFamily: "Arial, sans-serif", fontSize: 13, color: rust, maxWidth: 420, textAlign: "center" }}>{error}</div>
+        )}
+
+        <div style={{ marginTop: 28, fontFamily: "Arial, sans-serif", fontSize: 11.5, color: "#9A9D93", textAlign: "center", maxWidth: 400 }}>
+          Expected columns: Date, Invoice Number, Name, Amount, Due day, Payment status, Payment received date.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ fontFamily: "Arial, Helvetica, sans-serif", background: paper, minHeight: "100vh", padding: "28px 32px 40px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22, flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 12, letterSpacing: 0.5, color: gold, marginBottom: 4 }}>Accounts receivable</div>
+          <h1 style={{ fontFamily: "Georgia, serif", fontSize: 24, color: ink, margin: 0, fontWeight: 400 }}>Overdue invoice tracker</h1>
+          <div style={{ fontSize: 12, color: "#8B8E85", marginTop: 4 }}>{fileName} · {totals.invoices} invoices loaded</div>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={reset} style={{ fontSize: 13, color: ink, background: "transparent", border: "1px solid " + line, borderRadius: 4, padding: "8px 14px", cursor: "pointer" }}>Upload another</button>
+          <button onClick={downloadOverdueReport} disabled={totals.overdueCount === 0} style={{ fontSize: 13, color: "#fff", background: totals.overdueCount === 0 ? "#B7B9AF" : ink, border: "none", borderRadius: 4, padding: "8px 14px", cursor: totals.overdueCount === 0 ? "default" : "pointer" }}>Download overdue report</button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 1, background: line, border: "1px solid " + line, marginBottom: 26 }}>
+        {[
+          { label: "Companies", value: totals.companies, color: ink },
+          { label: "Overdue invoices", value: totals.overdueCount, color: rust },
+          { label: "Overdue amount", value: "₹" + fmtMoney(totals.overdueAmount), color: rust },
+          { label: "Paid invoices", value: totals.paidCount, color: forest },
+        ].map((s, i) => (
+          <div key={i} style={{ background: "#fff", padding: "16px 18px" }}>
+            <div style={{ fontSize: 11.5, color: "#8B8E85", marginBottom: 6 }}>{s.label}</div>
+            <div style={{ fontSize: 22, color: s.color, fontWeight: 600 }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ fontSize: 13, color: ink, fontWeight: 600 }}>By company</div>
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ fontSize: 12.5, color: ink, border: "1px solid " + line, borderRadius: 4, padding: "5px 8px", background: "#fff" }}>
+          <option value="overdueAmount">Sort: overdue amount</option>
+          <option value="overdueCount">Sort: overdue count</option>
+          <option value="name">Sort: company name</option>
+        </select>
+      </div>
+
+      <div style={{ border: "1px solid " + line, background: "#fff" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "28px 2fr 1fr 1fr 1fr 1fr", padding: "10px 14px", fontSize: 11, color: "#8B8E85", borderBottom: "1px solid " + line }}>
+          <div></div><div>Company</div><div>Invoices</div><div>Overdue</div><div>Overdue amount</div><div>Oldest overdue</div>
+        </div>
+
+        {companies.map((c) => {
+          const isOpen = expanded === c.name;
+          return (
+            <div key={c.name}>
+              <div onClick={() => setExpanded(isOpen ? null : c.name)} style={{ display: "grid", gridTemplateColumns: "28px 2fr 1fr 1fr 1fr 1fr", padding: "12px 14px", fontSize: 13.5, color: ink, cursor: "pointer", borderBottom: "1px solid " + line, alignItems: "center", background: c.overdueCount > 0 ? "#FCF7F2" : "#fff" }}>
+                <div style={{ color: "#8B8E85" }}>{isOpen ? "▾" : "▸"}</div>
+                <div style={{ fontWeight: 600 }}>{c.name}</div>
+                <div>{c.total}</div>
+                <div style={{ color: c.overdueCount > 0 ? rust : "#8B8E85", fontWeight: c.overdueCount > 0 ? 700 : 400 }}>{c.overdueCount}</div>
+                <div style={{ color: c.overdueCount > 0 ? rust : "#8B8E85", fontWeight: c.overdueCount > 0 ? 700 : 400 }}>{c.overdueCount > 0 ? "₹" + fmtMoney(c.overdueAmount) : "-"}</div>
+                <div style={{ color: "#8B8E85" }}>{c.maxDaysOverdue > 0 ? c.maxDaysOverdue + "d" : "-"}</div>
+              </div>
+
+              {isOpen && (
+                <div style={{ padding: "4px 14px 14px 42px", background: "#FAFAF8", borderBottom: "1px solid " + line }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                    <thead>
+                      <tr style={{ color: "#8B8E85", textAlign: "left" }}>
+                        <th style={{ fontWeight: 400, padding: "6px 8px 6px 0" }}>Invoice</th>
+                        <th style={{ fontWeight: 400, padding: "6px 8px" }}>Date</th>
+                        <th style={{ fontWeight: 400, padding: "6px 8px" }}>Due date</th>
+                        <th style={{ fontWeight: 400, padding: "6px 8px" }}>Amount</th>
+                        <th style={{ fontWeight: 400, padding: "6px 8px" }}>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {c.invoices.slice().sort((a, b) => (b.daysOverdue || 0) - (a.daysOverdue || 0)).map((r) => (
+                        <tr key={r.id} style={{ borderTop: "1px solid " + line }}>
+                          <td style={{ padding: "7px 8px 7px 0", color: ink }}>{r.invoiceNumber}</td>
+                          <td style={{ padding: "7px 8px", color: "#5B5E55" }}>{fmtDate(r.invoiceDate)}</td>
+                          <td style={{ padding: "7px 8px", color: "#5B5E55" }}>{fmtDate(r.dueDate)}</td>
+                          <td style={{ padding: "7px 8px", color: ink }}>₹{fmtMoney(r.amount)}</td>
+                          <td style={{ padding: "7px 8px" }}>
+                            {r.isPaid ? <span style={{ color: forest }}>Paid</span> : r.isOverdue ? <span style={{ color: rust }}>{r.daysOverdue}d overdue</span> : <span style={{ color: gold }}>Not yet due</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<InvoiceOverdueTracker />);
+</script>
+</body>
+</html>
