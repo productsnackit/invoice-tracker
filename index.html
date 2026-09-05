@@ -94,6 +94,7 @@ function InvoiceOverdueTracker() {
   const [dragOver, setDragOver] = useState(false);
   const [expanded, setExpanded] = useState(null);
   const [sortBy, setSortBy] = useState("overdueAmount");
+  const [search, setSearch] = useState("");
 
   const processFile = useCallback((file) => {
     setError("");
@@ -190,6 +191,12 @@ function InvoiceOverdueTracker() {
     return list;
   }, [rows, sortBy]);
 
+  const filteredCompanies = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return companies;
+    return companies.filter((c) => c.name.toLowerCase().includes(q));
+  }, [companies, search]);
+
   const totals = useMemo(() => {
     if (!rows) return null;
     return {
@@ -229,6 +236,28 @@ function InvoiceOverdueTracker() {
     XLSX.utils.book_append_sheet(wb, ws2, "By Company");
 
     XLSX.writeFile(wb, "overdue-report-" + new Date().toISOString().slice(0, 10) + ".xlsx");
+  };
+
+  const downloadCompanyReport = (company) => {
+    const overdue = company.invoices
+      .filter((r) => r.isOverdue)
+      .slice()
+      .sort((a, b) => b.daysOverdue - a.daysOverdue)
+      .map((r) => ({
+        "Invoice Number": r.invoiceNumber,
+        "Invoice Date": fmtDate(r.invoiceDate),
+        "Due Date": fmtDate(r.dueDate),
+        Amount: r.amount,
+        "Days Overdue": r.daysOverdue,
+      }));
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(overdue);
+    ws["!cols"] = [{ wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 13 }];
+    XLSX.utils.book_append_sheet(wb, ws, "Overdue Invoices");
+
+    const safeName = company.name.replace(/[\\/:*?"<>|]/g, "").slice(0, 60);
+    XLSX.writeFile(wb, safeName + "-overdue-" + new Date().toISOString().slice(0, 10) + ".xlsx");
   };
 
   const reset = () => {
@@ -301,31 +330,54 @@ function InvoiceOverdueTracker() {
         ))}
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 10 }}>
         <div style={{ fontSize: 13, color: ink, fontWeight: 600 }}>By company</div>
-        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ fontSize: 12.5, color: ink, border: "1px solid " + line, borderRadius: 4, padding: "5px 8px", background: "#fff" }}>
-          <option value="overdueAmount">Sort: overdue amount</option>
-          <option value="overdueCount">Sort: overdue count</option>
-          <option value="name">Sort: company name</option>
-        </select>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search company..."
+            style={{ fontSize: 12.5, color: ink, border: "1px solid " + line, borderRadius: 4, padding: "6px 10px", background: "#fff", width: 200 }}
+          />
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ fontSize: 12.5, color: ink, border: "1px solid " + line, borderRadius: 4, padding: "5px 8px", background: "#fff" }}>
+            <option value="overdueAmount">Sort: overdue amount</option>
+            <option value="overdueCount">Sort: overdue count</option>
+            <option value="name">Sort: company name</option>
+          </select>
+        </div>
       </div>
 
       <div style={{ border: "1px solid " + line, background: "#fff" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "28px 2fr 1fr 1fr 1fr 1fr", padding: "10px 14px", fontSize: 11, color: "#8B8E85", borderBottom: "1px solid " + line }}>
-          <div></div><div>Company</div><div>Invoices</div><div>Overdue</div><div>Overdue amount</div><div>Oldest overdue</div>
+        <div style={{ display: "grid", gridTemplateColumns: "28px 2fr 1fr 1fr 1fr 1fr 100px", padding: "10px 14px", fontSize: 11, color: "#8B8E85", borderBottom: "1px solid " + line }}>
+          <div></div><div>Company</div><div>Invoices</div><div>Overdue</div><div>Overdue amount</div><div>Oldest overdue</div><div></div>
         </div>
 
-        {companies.map((c) => {
+        {filteredCompanies.length === 0 && (
+          <div style={{ padding: "20px 14px", fontSize: 13, color: "#8B8E85", textAlign: "center" }}>No companies match "{search}".</div>
+        )}
+
+        {filteredCompanies.map((c) => {
           const isOpen = expanded === c.name;
           return (
             <div key={c.name}>
-              <div onClick={() => setExpanded(isOpen ? null : c.name)} style={{ display: "grid", gridTemplateColumns: "28px 2fr 1fr 1fr 1fr 1fr", padding: "12px 14px", fontSize: 13.5, color: ink, cursor: "pointer", borderBottom: "1px solid " + line, alignItems: "center", background: c.overdueCount > 0 ? "#FCF7F2" : "#fff" }}>
+              <div onClick={() => setExpanded(isOpen ? null : c.name)} style={{ display: "grid", gridTemplateColumns: "28px 2fr 1fr 1fr 1fr 1fr 100px", padding: "12px 14px", fontSize: 13.5, color: ink, cursor: "pointer", borderBottom: "1px solid " + line, alignItems: "center", background: c.overdueCount > 0 ? "#FCF7F2" : "#fff" }}>
                 <div style={{ color: "#8B8E85" }}>{isOpen ? "▾" : "▸"}</div>
                 <div style={{ fontWeight: 600 }}>{c.name}</div>
                 <div>{c.total}</div>
                 <div style={{ color: c.overdueCount > 0 ? rust : "#8B8E85", fontWeight: c.overdueCount > 0 ? 700 : 400 }}>{c.overdueCount}</div>
                 <div style={{ color: c.overdueCount > 0 ? rust : "#8B8E85", fontWeight: c.overdueCount > 0 ? 700 : 400 }}>{c.overdueCount > 0 ? "₹" + fmtMoney(c.overdueAmount) : "-"}</div>
                 <div style={{ color: "#8B8E85" }}>{c.maxDaysOverdue > 0 ? c.maxDaysOverdue + "d" : "-"}</div>
+                <div>
+                  {c.overdueCount > 0 && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); downloadCompanyReport(c); }}
+                      style={{ fontSize: 11.5, color: ink, background: "#fff", border: "1px solid " + line, borderRadius: 4, padding: "5px 8px", cursor: "pointer" }}
+                    >
+                      Download
+                    </button>
+                  )}
+                </div>
               </div>
 
               {isOpen && (
