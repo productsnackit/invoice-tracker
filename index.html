@@ -193,8 +193,7 @@ function InvoiceOverdueTracker() {
 
   const filteredCompanies = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return companies;
-    return companies.filter((c) => c.name.toLowerCase().includes(q));
+    return companies.filter((c) => c.overdueCount > 0 && (!q || c.name.toLowerCase().includes(q)));
   }, [companies, search]);
 
   const totals = useMemo(() => {
@@ -209,20 +208,23 @@ function InvoiceOverdueTracker() {
   }, [rows]);
 
   const downloadOverdueReport = () => {
-    const overdue = rows.filter((r) => r.isOverdue);
-    const data = overdue.slice().sort((a, b) => b.daysOverdue - a.daysOverdue).map((r) => ({
-      Company: r.company,
-      "Invoice Number": r.invoiceNumber,
-      "Invoice Date": fmtDate(r.invoiceDate),
-      "Due Date": fmtDate(r.dueDate),
-      Amount: r.amount,
-      "Days Overdue": r.daysOverdue,
-    }));
+    const all = rows
+      .slice()
+      .sort((a, b) => b.daysOverdue - a.daysOverdue)
+      .map((r) => ({
+        Company: r.company,
+        "Invoice Number": r.invoiceNumber,
+        "Invoice Date": fmtDate(r.invoiceDate),
+        "Due Date": fmtDate(r.dueDate),
+        Amount: r.amount,
+        Status: r.statusRaw,
+        "Days Overdue": r.isOverdue ? r.daysOverdue : "",
+      }));
 
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(data);
-    ws["!cols"] = [{ wch: 26 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 13 }];
-    XLSX.utils.book_append_sheet(wb, ws, "Overdue Invoices");
+    const ws = XLSX.utils.json_to_sheet(all);
+    ws["!cols"] = [{ wch: 26 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 13 }];
+    XLSX.utils.book_append_sheet(wb, ws, "All Invoices");
 
     const summaryData = companies.filter((c) => c.overdueCount > 0).map((c) => ({
       Company: c.name,
@@ -239,8 +241,7 @@ function InvoiceOverdueTracker() {
   };
 
   const downloadCompanyReport = (company) => {
-    const overdue = company.invoices
-      .filter((r) => r.isOverdue)
+    const all = company.invoices
       .slice()
       .sort((a, b) => b.daysOverdue - a.daysOverdue)
       .map((r) => ({
@@ -248,13 +249,14 @@ function InvoiceOverdueTracker() {
         "Invoice Date": fmtDate(r.invoiceDate),
         "Due Date": fmtDate(r.dueDate),
         Amount: r.amount,
-        "Days Overdue": r.daysOverdue,
+        Status: r.statusRaw,
+        "Days Overdue": r.isOverdue ? r.daysOverdue : "",
       }));
 
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(overdue);
-    ws["!cols"] = [{ wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 13 }];
-    XLSX.utils.book_append_sheet(wb, ws, "Overdue Invoices");
+    const ws = XLSX.utils.json_to_sheet(all);
+    ws["!cols"] = [{ wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 13 }];
+    XLSX.utils.book_append_sheet(wb, ws, "All Invoices");
 
     const safeName = company.name.replace(/[\\/:*?"<>|]/g, "").slice(0, 60);
     XLSX.writeFile(wb, safeName + "-overdue-" + new Date().toISOString().slice(0, 10) + ".xlsx");
@@ -312,7 +314,7 @@ function InvoiceOverdueTracker() {
         </div>
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={reset} style={{ fontSize: 13, color: ink, background: "transparent", border: "1px solid " + line, borderRadius: 4, padding: "8px 14px", cursor: "pointer" }}>Upload another</button>
-          <button onClick={downloadOverdueReport} disabled={totals.overdueCount === 0} style={{ fontSize: 13, color: "#fff", background: totals.overdueCount === 0 ? "#B7B9AF" : ink, border: "none", borderRadius: 4, padding: "8px 14px", cursor: totals.overdueCount === 0 ? "default" : "pointer" }}>Download overdue report</button>
+          <button onClick={downloadOverdueReport} disabled={totals.invoices === 0} style={{ fontSize: 13, color: "#fff", background: totals.invoices === 0 ? "#B7B9AF" : ink, border: "none", borderRadius: 4, padding: "8px 14px", cursor: totals.invoices === 0 ? "default" : "pointer" }}>Download full report</button>
         </div>
       </div>
 
@@ -354,7 +356,9 @@ function InvoiceOverdueTracker() {
         </div>
 
         {filteredCompanies.length === 0 && (
-          <div style={{ padding: "20px 14px", fontSize: 13, color: "#8B8E85", textAlign: "center" }}>No companies match "{search}".</div>
+          <div style={{ padding: "20px 14px", fontSize: 13, color: "#8B8E85", textAlign: "center" }}>
+            {search ? `No overdue companies match "${search}".` : "No companies currently have overdue invoices."}
+          </div>
         )}
 
         {filteredCompanies.map((c) => {
@@ -374,7 +378,7 @@ function InvoiceOverdueTracker() {
                       onClick={(e) => { e.stopPropagation(); downloadCompanyReport(c); }}
                       style={{ fontSize: 11.5, color: ink, background: "#fff", border: "1px solid " + line, borderRadius: 4, padding: "5px 8px", cursor: "pointer" }}
                     >
-                      Download
+                      Download all
                     </button>
                   )}
                 </div>
@@ -393,7 +397,11 @@ function InvoiceOverdueTracker() {
                       </tr>
                     </thead>
                     <tbody>
-                      {c.invoices.slice().sort((a, b) => (b.daysOverdue || 0) - (a.daysOverdue || 0)).map((r) => (
+                      {c.invoices
+                        .filter((r) => r.isOverdue)
+                        .slice()
+                        .sort((a, b) => (b.daysOverdue || 0) - (a.daysOverdue || 0))
+                        .map((r) => (
                         <tr key={r.id} style={{ borderTop: "1px solid " + line }}>
                           <td style={{ padding: "7px 8px 7px 0", color: ink }}>{r.invoiceNumber}</td>
                           <td style={{ padding: "7px 8px", color: "#5B5E55" }}>{fmtDate(r.invoiceDate)}</td>
